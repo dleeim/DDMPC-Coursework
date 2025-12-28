@@ -1,141 +1,183 @@
-from sklearn.linear_model import LinearRegression
+import numpy as np
+from sklearn.linear_model import LinearRegression, Lasso
 from sklearn.model_selection import train_test_split
 from scipy.optimize import minimize
 from sklearn.metrics import mean_squared_error, r2_score
-import numpy as np
+from sklearn.linear_model import MultiTaskLassoCV
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
 
-##############################
-# Example Exploration Scheme #
-##############################
-####################################
-# Please modify the function below #
-####################################
+time = 0
+
 def explorer(x_t: np.array, u_bounds: dict, timestep: int) -> np.array:
-    '''
-    Function to collect more data to train the model.
-    x_t (np.array) - Current state 
-    u_bounds (dict) - Bounds on control inputs
-    timestep (int) - Current timestep
-    
-    Output:
-    u_plus - Next control input
-    '''
+
+    global time 
 
     u_lower = u_bounds['low']
     u_upper = u_bounds['high']
 
+    u_0 = u_lower
+    u_1 = u_lower + (u_upper-u_lower)/3
+    u_2 = u_lower + 2*(u_upper-u_lower)/3
+    u_3 = u_upper
     
-    u_plus = np.random.uniform(u_lower, u_upper, size=u_lower.shape)
-    
-    return u_plus
-    
+    up_up = False
+    down_down = False
+    up_halfup = False
+    down_halfdown = False
+    up_down_up = False
 
-########################
-#Example Model Training#
-########################
-####################################
-# Please modify the function below #
-####################################
+    if time < 60 or time >= 300:
+        up_up = True
+    elif time >= 60 and time < 120:
+        down_down = True
+    elif time >= 120 and time < 180:
+        up_halfup = True
+    elif time >= 180 and time < 240:
+        down_halfdown = True
+    else:
+        up_down_up = True
+    
+    if up_up == True:
+        if timestep < 15:
+            u_plus = u_0
+        elif timestep >= 15 and timestep < 30:
+            u_plus = u_1
+        elif timestep >= 30 and timestep < 45:
+            u_plus = u_2
+        else:
+            u_plus = u_3
+    
+    elif down_down == True:
+        if timestep < 15:
+            u_plus = u_3
+        elif timestep >= 15 and timestep < 30:
+            u_plus = u_2
+        elif timestep >= 30 and timestep < 45:
+            u_plus = u_1
+        else:
+            u_plus = u_0
+
+    elif up_halfup == True:
+        if timestep < 15:
+            u_plus = np.array([u_0[0],u_0[0]])
+        elif timestep >= 15 and timestep < 30:
+            u_plus = np.array([u_1[0],u_1[0]])
+        elif timestep >= 30 and timestep < 45:
+            u_plus = np.array([u_2[0],u_2[0]])
+        else:
+            u_plus = np.array([u_3[0],u_3[0]])
+
+    elif down_halfdown == True:
+        if timestep < 15:
+            u_plus = np.array([u_3[0],u_3[0]])
+        elif timestep >= 15 and timestep < 30:
+            u_plus = np.array([u_2[0],u_2[0]])
+        elif timestep >= 30 and timestep < 45:
+            u_plus = np.array([u_1[0],u_1[0]])
+        else:
+            u_plus = np.array([u_0[0],u_0[0]])
+
+    elif up_down_up == True:
+        if timestep < 15:
+            u_plus = np.array([u_3[0],u_0[1]])
+        elif timestep >= 15 and timestep < 30:
+            u_plus = np.array([u_1[0],u_1[0]])
+        elif timestep >= 30 and timestep < 45:
+            u_plus = np.array([u_3[0],u_3[0]])
+        else:
+            u_plus = np.array([u_3[0],u_0[1]])
+
+    time += 1
+
+    return u_plus
+
 def model_trainer(data: np.array, env: callable) -> callable:
-    """
-    Trains a linear regression model using the provided data and environment parameters.
-    Parameters:
-    data (np.array): A tuple containing two numpy arrays: data_states and data_controls.
-                    data_states is a 3D array with shape (reps, states, n_steps).
-                    data_controls is a 3D array with shape (reps, controls, n_steps).
-    env (callable): An environment object that contains the environment parameters.
-    Returns:
-    model (LinearRegression): The trained linear regression model.
-    """
     data_states, data_controls = data
     
-    # Select only states with indices 1 and 8
+    # Select specific states (indices 1 and 8) and normalize
     selected_states = data_states[:, [1, 8], :]
-    
-    # Normalize the selected states and controls
     o_low, o_high = env.env_params['o_space']['low'][[1, 8]], env.env_params['o_space']['high'][[1, 8]]
     a_low, a_high = env.env_params['a_space']['low'], env.env_params['a_space']['high']
     selected_states_norm = (selected_states - o_low.reshape(1, -1, 1)) / (o_high.reshape(1, -1, 1) - o_low.reshape(1, -1, 1)) * 2 - 1
     data_controls_norm = (data_controls - a_low.reshape(1, -1, 1)) / (a_high.reshape(1, -1, 1) - a_low.reshape(1, -1, 1)) * 2 - 1
 
-    # Get the dimensions
+    # Extract dimensions
     reps, states, n_steps = selected_states_norm.shape
     _, controls, _ = data_controls_norm.shape
     
-    # Prepare the data
-    X_states = selected_states_norm[:, :, :-1].reshape(-1, states)
-    X_controls = data_controls_norm[:, :, :-1].reshape(-1, controls)
-    X = np.hstack([X_states, X_controls])
-    y = selected_states_norm[:, :, 1:].reshape(-1, states)
+    # Prepare X (current state + control) and y (change in state)
+    X_states = selected_states_norm[:, :, :-1].reshape(-1, states)  # state[t]
+    X_controls = data_controls_norm[:, :, :-1].reshape(-1, controls)  # control[t]
+    X = np.hstack([X_states, X_controls])  # Inputs: [state[t], control[t]]
+    
+    # Compute changes in states as output: Δstate[t] = state[t+1] - state[t]
+    y_diff = selected_states_norm[:, :, 1:] - selected_states_norm[:, :, :-1]  # Shape: (reps, states, n_steps-1)
+    y = y_diff.reshape(-1, states)  # Shape: (reps * (n_steps-1), states)
 
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Time series split
+    tscv = TimeSeriesSplit(n_splits=5)
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Train MultiTaskLassoCV on full data to predict changes
+    model = MultiTaskLassoCV(alphas=np.logspace(-4, 1, 50), cv=tscv, random_state=42)
+    model.fit(X_scaled, y)
 
-    # Create and train the model
-    model = LinearRegression(fit_intercept=False)
-    model.fit(X_train, y_train)
+    # Define predictor for changes
+    def next_state_predictor(x, u):
+        """
+        Predicts the next state given current state (x) and control (u).
+        Model predicts Δstate[t], so next state = x + Δstate[t].
+        """
+        X_in = np.hstack([x, u]).reshape(1, -1)
+        X_in_scaled = scaler.transform(X_in)
+        delta_state = model.predict(X_in_scaled)  # Predicted change: Δstate[t]
+        next_state = x + delta_state.flatten()  # Next state = current state + change
+        return next_state
 
-    # Evaluate the model
-    y_pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    print(f"Mean Squared Error: {mse:.4f}")
-    print(f"R2 Score: {r2:.3f}")
+    return next_state_predictor
 
-    return model
-
-
-
-
-####################
-#Example Controller#
-####################
-####################################
-# Please modify the function below #
-####################################
 def controller(x: np.array, f: callable, sp: callable, env: callable, u_prev: np.array,) -> np.array:
-    # Add names of team members and their respective CIDs
-    controller.team_names = ['Max Bloor', 'Antonio Del Rio Chanona']
-    controller.cids = ['01234567', '01234567']
+    controller.team_names = ['Donggyu Lee']
+    controller.cids = ['01560108']
 
     o_space = env.env_params['o_space']
     a_space = env.env_params['a_space']
     
-    Q = 10 # state cost
-    R = 500 # control cost
+    Q = 25  # Increased state cost for more precision
+    R = 7   # Reduced control cost for smoother control actions
     
-    horizon = 2 # Control Horizon
-    x_current = x[1] # Current state
+    horizon = 2
+    x_current = x[1]
 
     n_controls = a_space['low'].shape[0]
     u_prev = (u_prev - a_space['low']) / (a_space['high'] - a_space['low']) * 2 - 1
-    
-    # Prediction function with data-driven model
+
     def predict_next_state(current_state, control):
         current_state_norm = (current_state - o_space['low'][[1, 8]]) / (o_space['high'][[1, 8]] - o_space['low'][[1, 8]]) * 2 - 1
-        x = np.hstack([current_state_norm, control])
-        prediction = f.predict(x.reshape(1, -1)).flatten()
+        prediction = f(current_state_norm, control).flatten()
         return (prediction + 1) / 2 * (o_space['high'][[1, 8]] - o_space['low'][[1, 8]]) + o_space['low'][[1, 8]]
-    
-    # Controller objective function 
+
     def objective(u_sequence):
         cost = 0
         x_pred = x_current
         for i in range(horizon):
+            u_current = u_sequence[i*n_controls:(i+1)*n_controls]
             error = x_pred - sp
             cost += np.sum(error**2) * Q
-            u_current = u_sequence[i*n_controls:(i+1)*n_controls]
             cost += np.sum((u_current - u_prev)**2) * R
             x_pred = predict_next_state(x_pred, u_current)
+            u_current_denorm = (u_current + 1) / 2 * (a_space['high'] - a_space['low']) + a_space['low']
         return cost
-    
-    # Initial control guess and bounds (working in normalised control inputs)
-    u_init = np.ones((horizon, 2)) * u_prev
-    bounds = [(-1, 1)] * (horizon * n_controls)
-    
-    # Use scipy minimize to optimise the control cost
-    result = minimize(objective, u_init.flatten(), method='powell', bounds=bounds)
 
-    # Return the control input in the actual bounds
-    optimal_control = result.x[:2]
+    u_init = np.ones(horizon * n_controls)
+    bounds = [(-1, 1)] * (horizon * n_controls)
+
+    result = minimize(objective, u_init, method='SLSQP', bounds=bounds)
+
+    optimal_control = result.x[:n_controls]
+
     return (optimal_control + 1) / 2 * (a_space['high'] - a_space['low']) + a_space['low']
