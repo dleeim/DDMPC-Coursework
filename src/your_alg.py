@@ -138,7 +138,7 @@ def model_trainer(data: np.array, env: callable) -> callable:
         next_state = x + delta_state.flatten()  # Next state = current state + change
         return next_state
 
-    return next_state_predictor
+    return (model, next_state_predictor, X_scaled, y)
 
 def controller(x: np.array, f: callable, sp: callable, env: callable, u_prev: np.array,) -> np.array:
     controller.team_names = ['Donggyu Lee']
